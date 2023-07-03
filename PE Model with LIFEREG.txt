@@ -1,0 +1,174 @@
+OPTIONS NOSOURCE;
+
+*------------ Conditional Survival using the PE Model ---------------+
+|                                                                    |
+|   The purpose of this code is to implement the statistical         |
+|   procedures for performing overall and conditional survival       |
+|   analysis using the piecewise exponential regression model.       |
+|   The details are provided in the published manuscript.            |
+|                                                                    |
+|   The piecewise exponential partitions time into discrete          |
+|   intervals, and prescribes a constant hazard within any           |
+|   interval but different hazards across the intervals.             |
+|   The data are analyzed by creating a dataset with one             |
+|   observation per subject for each interval during which s/he is   |
+|   at risk of the event. See the manuscript and the SAS monograph   |
+|   by Paul Allison (2010) for the details. This is implemented in   |
+|   the first part of this program.                                  |
+|                                                                    |
+|   Then, the PE model is applied using PROC LIFEREG. This is the    |
+|   second part. To address whether there are between-group          |
+|   differences in the survival probabilities at specific time       |
+|   points, the model must prescribe different intercepts by time    |
+|   and treatment. This is equivalent to a treatment x time          |
+|   interaction model. The easiest way to accomplish this is         |
+|   include a Treatment*Time interaction term (in that order) in the |
+|   MODEL statement to the LIFEREG procedure, skip the main effects  |
+|   and specify NOINT. We further suppose that the covariates        |
+|   are centered at reference values so that they can effectively    |
+|   be ignored in what follows.                                      |
+|                                                                    |
+|   In the third part of the program, the ODS OUTPUT statement       |
+|   together with COVB option exports the mu(a,t) terms and their    |
+|   covariance structure to external datasets. These datasets are    |
+|   subsequently used the second program in the package. It reads    |
+|   them into IML, and goes through the various steps to derive the  |
+|   OS and CS probabilities and perform Wald chi-squared tests.      |
+|                                                                    |
++--------------------------------------------------------------------;
+
+OPTIONS SOURCE LS=132;
+
+LIBNAME CANCER 
+     'H:\ITN100ST\FINAL';                     /* Folder */ 
+	  
+   /* Read the .csv file into a SAS dataset using PROC IMPORT     */
+
+PROC IMPORT OUT=COLON
+    DATAFILE="H:\ITN100ST\final\COLON.CSV"   /* Change to the file*/
+    DBMS=CSV                                 /* on your system    */
+    REPLACE;
+    GETNAMES=YES;
+RUN;	
+
+DATA COLON;
+     SET COLON;
+     KEEP ID RX GROUP SEX AGE STATUS TIME ETYPE;
+     IF ETYPE=2;                   /* Analyze the death outcome   */         
+     AGE = AGE - 60;               /* Center at the mean of 60    */
+     SEX = 2*SEX - 1;              /* Code as a (-1, +1) variable */
+	 
+   /* Combine the obs and lev groups together                     */
+     GROUP = RX;
+     IF RX='Obs' OR RX='Lev' THEN GROUP='Pool';   
+RUN;
+     
+PROC SORT DATA=COLON; BY ID;
+RUN;
+
+   /* Now, create the analysis dataset for the PE model. For each ID,
+      the dataset will consist of one observation for each interval
+      during which the subject is at risk. The last observation is the
+      one in which the subject either had the event or was censored
+      by the end of his/her follow-up. STATUS2 is defined accordingly.
+      In intervals prior to this, the subject is considered censored in 
+      that interval. TIME2 is always the elapsed time from the beginning
+      of the interval.                                               */	  
+
+   /* Use a macro to identify the set of cutpoints (in days). Separate 
+      them with commas. The last one should be >= the max follow-up.
+      I used 10000 because it was convenient.                        */
+	 
+     %LET CPOINTS = 182, 365, 547, 730, 1095, 1460, 2190, 10000; 
+
+DATA INTERVALS;
+      SET COLON;
+      BY ID;
+
+   /* Determine the interval corresponding to the amount of 
+      FU before having the event or being censored. Create one
+      observation per interval while under observation.     */       
+
+   /* First, initialize some values.                        */    
+      IF FIRST.ID THEN DO;
+         INTERVAL = 0; LAST = 0; LAGGED = 0;
+      END;
+     
+   /* Process one interval at a time using the cutpoints until
+      the interval with the event or censoring is observed. */
+
+      DO INT = &CPOINTS;
+         INTERVAL = INTERVAL + 1; 
+         IF TIME > INT THEN DO;      /* Later interval     */
+            STATUS2 = 0;             /* Censored this int  */
+            TIME2 = INT - LAGGED;    /* Elapsed from start */
+            LAGGED = INT;            /* For next iteration */
+            OUTPUT;                  /* To the dataset     */
+          END;                       /* Of TIME > INT loop */
+          
+          ELSE IF TIME <= INT THEN DO; /* This interval    */
+            STATUS2 = STATUS;        /* Use the status     */
+            TIME2 = TIME - LAGGED;   /* Elapsed from start */
+            LAST = 1;                /* Last intfor this ID*/
+            OUTPUT;                  /* To the dataset     */
+          END;                     /* Of TIME <= INT loop  */
+          IF LAST = 1 THEN LEAVE;  /* Jump out of the loop */
+       END;                        /* Of DO INT loop       */
+       
+PROC PRINT DATA=INTERVALS (OBS=144);
+     VAR ID STATUS TIME INTERVAL LAST LAGGED STATUS2 TIME2;
+TITLE  'Analysis of the Moertel Colon Cancer Dataset';
+TITLE3 'Check on the Derived Dataset for the PE Analysis';
+RUN;
+
+   /* Now, use LIFEREG to run the PE analysis for the two groups */
+
+ODS OUTPUT COVB=COVB PARAMETERESTIMATES=PARAM; /* To capture the estimates */
+PROC LIFEREG DATA=INTERVALS;
+   CLASS GROUP INTERVAL;         /* Easier if they are the only CLASS vars */
+   MODEL TIME2*STATUS2(0)= GROUP*INTERVAL AGE SEX / NOINT COVB DIST=EXPONENTIAL;
+   TITLE3 'Piecewise Exponential Model - Treatment x Time model - Adjusting for Age and Sex';
+RUN;
+
+   /* Now, process the PARAM dataset. Delete anything related to
+      the extraneous parameters from the LIFEREG analysis.  You may 
+      need to be careful about upper- and lower-case letters here. */
+
+DATA CANCER.PARAM;
+     SET PARAM;   
+     KEEP Estimate;            /* Only keep the parameter estimates       */
+     IF PARAMETER='Intercept' OR PARAMETER='age' or PARAMETER='sex' 
+         OR PARAMETER='Scale' OR PARAMETER='Weibull Shape' THEN DELETE;
+           /* Delete the rows corresponding to these incidental parameters */
+RUN;
+
+PROC PRINT DATA=CANCER.PARAM;
+TITLE3 'Check the estimates of the mu(a,t) parameters';
+TITLE4 'Check against the LIFEREG output';
+RUN;
+
+    /* Similarly, for the COVB dataset. */
+
+DATA CANCER.COVB;
+     SET COVB;
+     DROP Variable Intercept age sex Scale;  /* DROP these incidental variables */
+     IF VARIABLE='Intercept' OR VARIABLE='age' or VARIABLE='sex'        
+              OR VARIABLE='Scale' THEN DELETE;
+                /* Delete the rows corresponding to these incidental parameters */
+RUN;
+
+PROC PRINT DATA=CANCER.COVB (OBS=32);
+TITLE3 'Check the estimates of the associated covariance parameters';
+TITLE4 'Check against the LIFEREG output';
+RUN;
+
+    /* Save the COLON dataset into a permanent one for future use         */
+
+DATA CANCER.COLON;
+     SET COLON;
+RUN;
+
+    /* We are now set to read the MU(a,t) and its covariance structure
+       into IML. This is performed in the second program in this package. */
+
+ODS PDF CLOSE;

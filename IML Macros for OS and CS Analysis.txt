@@ -1,0 +1,278 @@
+*--------------------------------------------------------------------+
+|                                                                    |
+|   The purpose of this IML code is to implement the statistical     |
+|   procedures for performing overall and conditional survival       |
+|   analysis using the piecewise exponential regression model.       |
+|   The details are provided in the published manuscript.            |
+|                                                                    |
+|   This program assumes that the accompanying LIFEREG program has   |
+|   already been run, and the estimates of the MU(a,t) parameters    |
+|   and the associated covariance structure are available to be      |
+|   read into matrices here. These quantities are assumed to be      |
+|   named PARAM and COVB, respectively, and are read into the        |
+|   matrices, _MU_ and _COV_MU. These quantities are then            |
+|   manipulated in a series of 4 steps to derive the OS              |
+|   survival probabilities as described in the manuscript. The       |
+|   critical step is Step 3 corresponding to equation 5. This        |
+|   applies the lower triangular matrix to derive the cumulative     |
+|   hazards over time. In any new application, you would need to     |
+|   change the _DELTA_ vector to reflect the elapsed times between   |
+|   the cutpoints.                                                   |
+|                                                                    |
+|   DISCLAIMER:                                                      |
+|   ----------                                                       |
+|                                                                    |
+|   THIS SOFTWARE IS PROVIDED BY JAMES ROCHON AS A PUBLIC SERVICE    |
+|   IT IS PROVIDED "AS IS." THERE ARE NO WARRANTIES, EXPRESSED OR    |
+|   IMPLIED, AS TO ITS FITNESS FOR A PARTICULAR PURPOSE OR REGARDING |
+|   THE ACCURACY OF THE MATERIALS OR CODE CONTAINED HEREIN.          |
+|                                                                    |
+|   A good analyst will always scrutinize new code, and make sure    |
+|   that it is correct and appropriate for the application under     |
+|   consideration. A good way to verify the results is to compare    |
+|   them to those from a similar method, e.g., a PH analysis.        |
+|                                                                    |
+|   This program is being provided under a Creative Commons          |
+|   CC BY-NC license. You are allowed to distribute, remix, adapt,   |
+|   and build upon this material in any medium or format but for     |
+|   noncommercial purposes only. Further, You must give  appropriate |
+|   credit to the author, and indicate if any changes  were          |
+|   made. You may do so in any reasonable manner, but not in         |
+|   a way that suggests that the author endorses you or your use.    |
+|   You may not apply legal terms or technological measures that     |
+|   legally restrict others from doing anything the license permits. |
+|                                                                    |
++--------------------------------------------------------------------;
+
+   RESET NOAUTONAME CENTER FUZZ=1E-12 LINESIZE=80 NONAME PAGESIZE=55;  
+
+   START BEGIN;
+
+   /* Initialize various quantities to their default values */
+   
+     _MU_ = 0;  _COV_MU=0;      /* Default to zeros         */
+     _BLANK_ = ' ';   
+     _FLAG_H = 0;   /* Whether the header has been printed. */
+
+     _ALPHA_ = 0.05; /* alpha level for confidence interval */ 
+     _PRINT_ = 1;    /* Detail in the print-out             */
+     _CSTATS_ = 0;   /* Stats for Wald chi-square test      */
+	 
+   /* Default names for the MU(a,t) terms                   */	 
+     _MUNAMES_ = {'MU1' 'MU2' 'MU3' 'MU4' 'MU5'
+                  'MU6' 'MU7' 'MU8' 'MU9' 'MU10'
+                  'MU11' 'MU12' 'MU13' 'MU14' 'MU15'
+                  'MU16' 'MU17' 'MU18' 'MU19' 'MU20' 
+                  'MU21' 'MU22' 'MU23' 'MU24' 'MU25'
+                  'MU26' 'MU27' 'MU28' 'MU29' 'MU30'}; 
+
+   FINISH;
+
+*----------------------------  HEADER  ------------------------------;
+
+   START HEADER;
+
+     PRINT ,,
+     '+--------------------------------------------------------+',
+     '|                                                        |',
+     '|                  S U R V P R O B S:                    |',
+     '|                                                        |',
+     '|           Performing Inference on Survival             |',
+     '|                                                        |',
+     '|           Probabilities from the Piecewise             |',
+     '|                                                        |',
+     '|                   Exponential Model                    |',
+     '|                                                        |',
+     '|          Copyright (c) 2018 by James Rochon            |',
+     '|                                                        |',
+     '+--------------------------------------------------------+';
+     _FLAG_H = 1;          /* Trip the flag */
+
+   FINISH;
+
+*----------------------------  DIVIDER  -----------------------------;
+
+   START DIVIDER;
+       PRINT ,,'= = = = = = = = = = = = = = = = = = = = = = = = = =',,;
+   FINISH;
+
+*---------------------------- CHECKING ------------------------------;
+
+   START CHECKING;
+
+   /* This subroutine checks to make sure that the appropriate
+      matrices are defined and are of the appropriate dimensions.
+   
+      Matrices assumed to exist as CHECKING is called:
+
+     _MU_      ... A column vector of the treatment x time intercept 
+                   terms from the piecewise exponential model. The intercepts
+                   should be in the correct time order, with Group 1 
+                   intercepts first followed by Group 2.
+     _COV_MU   ... The corresponding covariance matrix using COVOUT.
+     _MUNAMES_ ... [Optional]. A column vector of labels for the 
+                    elements of _MU_.                              */				   
+
+   /* Check if _MU_ and _COV_MU are of the appropriate dimensions */
+   
+    _CHECK_ = 0;
+     IF NROW(_COV_MU) ^= NCOL(_COV_MU) THEN _CHECK_=_CHECK_+1; /* Square   */
+     IF NROW(_MU_) ^= NROW(_COV_MU) THEN _CHECK_=_CHECK_+1; /* Conformable */
+     IF NCOL(_MU_) ^= 1 THEN _CHECK_=_CHECK_+1;             /* Vector      */
+
+     IF _CHECK_ > 0 THEN DO;
+        PRINT,,
+        'The input matrices are not of the appropriate dimensions.',
+        'Please make sure they were read correctly.',
+        'Here are the _MU_ and _COV_MU quantities provided.';       
+        PRINT _MU_ [ROWNAME=_MUNAMES_ COLNAME=_BLANK_];
+        PRINT _COV_MU [ROWNAME=_MUNAMES_ COLNAME=_MUNAMES_];
+        PRINT ,, '... SurvProbs is now ending ...';
+        STOP;
+     END;
+     FREE _CHECK_;
+
+   /* Print back the input quantities according to the _PRINT_ value */
+
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT ,, 'The treatment by time intercept terms';
+        PRINT _MU_ [ROWNAME=_MUNAMES_ COLNAME=_BLANK_ FORMAT=10.4];
+     END;                    /* of the PRINT >= 1 loop */
+     IF _PRINT_ >= 2 THEN DO;
+        PRINT ,, 'The corresponding covariance structure';
+        PRINT _COV_MU [ROWNAME=_MUNAMES_ COLNAME=_MUNAMES_ FORMAT=10.4];
+     END;                /* of the PRINT >= 2 loop   */
+
+   FINISH;               /* From CHECKING subroutine */
+
+  /* In the next section we define two subroutines to 
+     perform linear and exponent transformations.
+     The Delta method is used to derive the associated
+     covariance structure for the latter.                */
+
+*-----------------------------  LINEAR  -----------------------------;
+
+   START LINEAR(A,VEC,COV);
+   
+   /* A is the transformation matrix, VEC is the vector and
+      COV is the covariance matrix.  Important: this subroutine 
+      overwrites the VEC and COV with the results
+      when it returns to the main program.              */
+
+   /* Ensure that A is the appropriate dimension        */
+
+     IF NCOL(A) ^= NROW(VEC) THEN DO;
+        PRINT ,,
+         'The transformation matrix, A, is not of the',
+         'appropriate dimension.  The following matrices',
+         'may help identify the problem';
+        PRINT A;  PRINT VEC;
+        PRINT ,, '... SURVPROBS is now ending ...';
+        STOP;
+     END;
+
+     VEC = A * VEC;           /* Linear transformation */
+     COV = A * COV * A`;      /* Covariance matrix     */
+
+   FINISH;                    /* Of LINEAR subroutine  */
+
+*-------------------------------  EEXP  -----------------------------;
+
+   START EEXP(VEC,COV);
+   
+   /* VEC is the vector and COV is the covariance matrix. Important: 
+      this subroutine overwrites the VEC and COV with the 
+      results when it returns to the main program.             */
+
+     VEC = EXP(VEC);                      /* Take exponent     */
+     GRID = VEC * VEC`;	
+	 
+  /* Multiplying by GRID is arithmetically equivalent to pre- and
+     post-multiplying by a diagonal matrix consisting of VEC.  */
+	 
+     COV = COV # GRID;  FREE GRID;       /*  Covariance matrix */
+
+   FINISH; 
+   
+   *-----------------------------  LTRIANG  -------------------------;
+
+   /* Next, define a function that returns the lower diagonal
+      matrix for deriving the cumulative hazard function.       */
+
+   START LTRIANG(VEC);
+   
+  /* The input is a row vector with the elements comprising
+     the different columns of the output matrix.                */
+	  
+     R = NROW(VEC); C = NCOL(VEC);
+     IF R > 1 THEN DO;
+        PRINT ,,
+         'The vector with the elements for the lower diagonal matrix',
+         'is not of the appropriate dimension. It should be a row',
+         'vector. The following matrix may help identify the problem.';
+        PRINT VEC;
+        PRINT ,, '... SURVPROBS is now ending ...';
+        STOP;
+     END;
+	 
+     MATRIX = J(C,C,0);
+     DO I = 1 TO C;
+        DO J = 1 TO I;
+           MATRIX[I,J] = VEC[J];
+        END;
+     END;
+	 
+     RETURN MATRIX;
+
+   FINISH;                               /* Of LTRIANG subroutine */   
+
+*-----------------------------  WALDTEST  ---------------------------;
+   
+  /* Next, define a subroutine to perform a Wald chi-square
+     test of significance. It returns summary statistics
+     including the p-value from the test.                      */
+
+   START WALDTEST(C,VEC,COV,CSTATS);
+   
+    /* C is the contrast vector, VEC is the parameter vector, 
+       COV is the covariance matrix, and CSTATS is the variable
+       which returns the test statistics. First, ensure that
+       C is the appropriate dimension.                         */
+
+     IF NCOL(C) ^= NROW(VEC) THEN DO;
+        PRINT ,,
+         'The contrast matrix is not of the appropriate dimension.',
+         'The following matrices may help identify the problem';
+        PRINT C;  PRINT VEC;
+        PRINT ,, '... SURVPROBS is now ending ...';
+        STOP;
+     END;
+	 
+     DF = NROW(C);                       /* Degrees of freedom */
+     OMEGA = C * VEC;
+     CHI = C * COV * C`;
+     CHI = SWEEP(CHI);                   /* Take the inverse   */
+	 
+   /* Check for singularity in this matrix */
+
+     DO DUM = DF TO 1 BY -1;
+        IF ALL(CHI[DUM, ] = 0) THEN DO;
+          PRINT ,,
+           '- - - - -  P R O B L E M  - - - - -',,
+           'The contrast matrix C is not full',
+           'rank. Zeroes in the following matrix may help',
+           'identify the offending elements';
+          PRINT CHI [ FORMAT=10.4 ];
+          PRINT ,, '... SURVPROBS is now ending ...';
+          STOP;
+        END;                  /* OF IF ALL LOOP */
+     END;   FREE DUM;         /* OF DO DUM LOOP */
+	 
+   /* Derive the Wald chi-square statistic and p-value */	 
+	 
+     CHI = OMEGA` * CHI * OMEGA;   /* chi-square value */
+     PVAL = 1 - PROBCHI(CHI,DF);   /* p-value          */
+     CSTATS = CHI || DF || PVAL;   /* Test statistics  */
+
+   FINISH;                 /* Of WALDTEST subroutine */
+

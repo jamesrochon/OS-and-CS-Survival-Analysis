@@ -1,0 +1,217 @@
+LIBNAME CANCER 'H:\ITN100ST\Final';
+
+   /* First, invoke IML, and use the %INCLUDE statement  
+      to read in the IML macros.                            */                 
+
+PROC IML;
+   TITLE3 'Inference on OS and CS Probabilities using the PE Model';
+
+     %INCLUDE 
+	  'H:\ITN100ST\Final\IML Macros for OS and CS Analysis.txt' / NOSOURCE2;   
+	 
+    /* Now, having set up all the macros of interest, 
+       we are ready to run an analysis. First, run BEGIN
+       and print the header.                                   */
+
+     RUN BEGIN;	 
+
+     IF _FLAG_H = 0 &  
+       _PRINT_ >= 1 THEN RUN HEADER;    /* Print the header    */
+
+    /* Now, apply the USE and READ statements to read in the 
+       parameter estimates and covariance structure from
+       the ODS statements in LIFEREG. We should have the _MU_
+       vector and the _COV_MU with the appropriate structure and 
+       appropriate dimensions.                                 */
+	  
+     USE CANCER.PARAM;                       
+     READ ALL INTO _MU_;
+     _MUNAMES_ = {'Comb6' 'Comb12' 'Comb18' 'Comb24' 'Comb36' 'Comb48' 'Comb72' 'Comb108' 
+                  'Pool6' 'Pool12' 'Pool18' 'Pool24' 'Pool36' 'Pool48' 'Pool72' 'Pool108'};
+     USE CANCER.COVB;
+     READ ALL INTO _COV_MU;	
+     
+    /* Run the CHECKING module to ensure that both quantities are correct */
+     RUN CHECKING; 
+	 
+    /* Run through the steps to generate the log survival
+      probabilities and their corresponding covariance structure.
+	  
+      1. The regression coefficients in the ln(hazards) 
+      representation are the negative of their counterparts
+      in the ln(T) model. So, take the negative.              */	  
+      _LN_HAZ = (-1) # _MU_; _COV_LH = _COV_MU; 
+	 
+   /* 2. Exponentiate the ln (hazards) to derive hazards.     */
+     _HAZ_ = _LN_HAZ; _COV_HAZ = _COV_LH;
+     RUN EEXP(_HAZ_,_COV_HAZ); 
+	 
+   /* 3. Accumulate the hazards over the discrete intervals. 
+         This corresponds to the lower triangular matrix in
+         equation (5) in the paper. _DELTA_ is a row vector consisting  
+         of the elapsed time (in days) between the cutpoints.  */  
+		 
+     _DELTA_ = {182.5 182.5 182.5 182.5 365 365 730 1095};
+     _DELTA_ = LTRIANG(_DELTA_);   /* Create lower diagonal matrix */
+     _DELTA_ = I(2) @ _DELTA_;	   /* Kronecker product            */
+     _CUM_HAZ = _HAZ_; _COV_CH = _COV_HAZ;	 
+     RUN LINEAR(_DELTA_,_CUM_HAZ,_COV_CH);
+
+   /* 4. The ln survival probabilities are the negative of 
+      the cumulative hazards. So, take the negative.          */
+     _LN_S = (-1) # _CUM_HAZ; _COV_LNS = _COV_CH;
+	 
+   /* Generate confidence intervals for the OS survival
+      probabilities. Start on the ln survival scale.          */
+	 
+      _STD_ERR = SQRT(VECDIAG(_COV_LNS));   /* Standard errors */
+      _PCTL_ = PROBIT(1 - _ALPHA_/2);       /* Critical value  */
+      _LOWER_ = _LN_S - _PCTL_#_STD_ERR;    /* Lower limit     */
+      _UPPER_ = _LN_S + _PCTL_#_STD_ERR;    /* Upper limit     */
+      _CI_ = _LOWER_ || _LN_S || _UPPER_;   /* Concatenate     */
+	 
+   /* Exponentiate to get back to the original survival scale.*/ 
+      _CI_ = EXP(_CI_);
+
+   /* Derive the s.e. on the original scale.           */
+      _SE_ = EXP(_LN_S) # _STD_ERR;
+      _CI_ = _CI_ || _SE_;
+
+     IF _PRINT_ >= 1 THEN DO;
+        _CNAMES_ = {"Lower" "OS Prob" "Upper" "Std. Err."};	 
+        PRINT ,,
+        'Estimated OS Probabilities and Confidence Limits';
+         PRINT _CI_ [COLNAME=_CNAMES_ ROWNAME=_MUNAMES_ FORMAT=10.3];
+         RUN DIVIDER;
+	 END;                  /* Of _PRINT_ loop */ 
+
+   /* Test for the overall between-group difference */   
+     _C_ = I(8) || (-1)#I(8);     
+     RUN WALDTEST(_C_,_LN_S,_COV_LNS,_CSTATS_); 	
+	 
+   /* Print the results as the user requests.       */   
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT , 'Test for overall survival difference';
+        PRINT , 'The contrast matrix for this hypothesis';
+        PRINT _C_ [ROWNAME=_BLANK_ COLNAME=_MUNAMES_ FORMAT=6.0];
+        GNAMES = { "Chi sq." "d.f." "p-value" }; 
+        PRINT , 
+        'Wald Chi-square test of significance';
+        PRINT _CSTATS_ [COLNAME=GNAMES ROWNAME=_BLANK_ FORMAT=10.4];
+        RUN DIVIDER;
+     END;   /* of _PRINT_ loop */		 
+     
+   /* Test for the between-group difference at 2 years */   
+     _C_ = {0 0 0 1 0 0 0 0   0 0 0 -1 0 0 0 0};     
+     RUN WALDTEST(_C_,_LN_S,_COV_LNS,_CSTATS_); 	
+	 
+   /* Print the results as the user requests.       */    
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT , 'Test for survival difference at 2 years';
+        PRINT , 'The contrast matrix for this hypothesis';
+        PRINT _C_ [ROWNAME=_BLANK_ COLNAME=_MUNAMES_];
+        GNAMES = { "Chi sq." "d.f." "p-value" }; 
+        PRINT , 
+        'Wald Chi-square test of significance';
+        PRINT _CSTATS_ [COLNAME=GNAMES ROWNAME=_BLANK_ FORMAT=10.4];
+        RUN DIVIDER;
+     END;   /* of _PRINT_ loop */	
+
+   /* Test for the between-group difference at 3 years */   
+     _C_ = {0 0 0 0 1 0 0 0   0 0 0 0 -1 0 0 0};     
+     RUN WALDTEST(_C_,_LN_S,_COV_LNS,_CSTATS_); 	
+	 
+   /* Print the results as the user requests.          */    
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT , 'Test for survival difference at 3 years';
+        PRINT , 'The contrast matrix for this hypothesis';
+        PRINT _C_ [ROWNAME=_BLANK_ COLNAME=_MUNAMES_];
+        GNAMES = { "Chi sq." "d.f." "p-value" }; 
+        PRINT , 
+        'Wald Chi-square test of significance';
+        PRINT _CSTATS_ [COLNAME=GNAMES ROWNAME=_BLANK_ FORMAT=10.4];
+        RUN DIVIDER;
+     END;   /* of _PRINT_ loop */	
+
+   /* Now, derive the conditional survival probabilities 
+      conditional to surviving to the end of the first year. */
+
+     _L_ = J(6,1,0) || J(6,1,-1) || I(6);   /* Transform matrix */
+     _L_ = I(2) @ _L_;                      /* Kronecker prod   */
+     _CSNAMES_ = {'Comb18' 'Comb24' 'Comb36' 'Comb48' 'Comb72' 'Comb108' 
+                  'Pool18' 'Pool24' 'Pool36' 'Pool48' 'Pool72' 'Pool108'};
+     _CONDS_ = _LN_S; _COV_CS = _COV_LNS;
+    RUN LINEAR(_L_,_CONDS_,_COV_CS);
+	
+  /* Generate confidence intervals for the conditional
+     survival probabilities.                                  */
+	 
+     _STD_ERR = SQRT(VECDIAG(_COV_CS));    /* Standard errors */
+     _PCTL_ = PROBIT(1 - _ALPHA_/2);       /* Critical value  */
+     _LOWER_ = _CONDS_ - _PCTL_#_STD_ERR;  /* Lower limit     */
+     _UPPER_ = _CONDS_ + _PCTL_#_STD_ERR;  /* Upper limit     */	 
+     _CI_ = _LOWER_ || _CONDS_ || _UPPER_; /* Concatenate     */
+	 
+   /* Exponentiate to get back to the original survival scale.*/ 
+     _CI_ = EXP(_CI_);
+
+   /* Derive the s.e. on the original scale.           */
+      _SE_ = EXP(_CONDS_) # _STD_ERR;
+      _CI_ = _CI_ || _SE_;
+
+     IF _PRINT_ >= 1 THEN DO;
+        _CNAMES_ = {"Lower" "CS Prob" "Upper" "Std. Err."};	 
+	    PRINT ,,
+        'Estimated CS Probabilities and Confidence Limits';
+         PRINT _CI_ [COLNAME=_CNAMES_ ROWNAME=_CSNAMES_ FORMAT=10.3];
+         RUN DIVIDER;
+	 END;                  /* Of _PRINT_ loop */ 
+     
+   /* Test for the overall between-group difference */   
+     _C_ = I(6) || (-1)#I(6);     
+     RUN WALDTEST(_C_,_CONDS_,_COV_CS,_CSTATS_); 	
+	 
+   /* Print the results as the user requests.       */   
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT , 'Test for overall CS survival difference';
+        PRINT , 'The contrast matrix for this hypothesis';
+        PRINT _C_ [ROWNAME=_BLANK_ COLNAME=_MUNAMES_];
+        GNAMES = { "Chi sq." "d.f." "p-value" }; 
+        PRINT , 
+        'Wald Chi-square test of significance';
+        PRINT _CSTATS_ [COLNAME=GNAMES ROWNAME=_BLANK_ FORMAT=10.4];
+        RUN DIVIDER;
+     END;   /* of _PRINT_ loop */	
+     
+   /* Test for the between-group difference at 2 years in CS Probabilities */   
+     _C_ = {0 1 0 0 0 0  0 -1 0 0 0 0};     
+     RUN WALDTEST(_C_,_CONDS_,_COV_CS,_CSTATS_); 	
+	 
+   /* Print the results as the user requests.       */    
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT , 'Test for survival difference at 2 years in the CS probabilities';
+        PRINT , 'The contrast matrix for this hypothesis';
+        PRINT _C_ [ROWNAME=_BLANK_ COLNAME=_CSNAMES_];
+        GNAMES = { "Chi sq." "d.f." "p-value" }; 
+        PRINT , 
+        'Wald Chi-square test of significance';
+        PRINT _CSTATS_ [COLNAME=GNAMES ROWNAME=_BLANK_ FORMAT=10.4];
+        RUN DIVIDER;
+     END;   /* of _PRINT_ loop */	
+
+   /* Test for the between-group difference at 3 years in CS Probabilities*/   
+     _C_ = {0 0 1 0 0 0  0 0 -1 0 0 0};     
+     RUN WALDTEST(_C_,_CONDS_,_COV_CS,_CSTATS_); 	
+	 
+   /* Print the results as the user requests.       */    
+     IF _PRINT_ >= 1 THEN DO;
+        PRINT , 'Test for survival difference at 3 years in the CS probabilities';
+        PRINT , 'The contrast matrix for this hypothesis';
+        PRINT _C_ [ROWNAME=_BLANK_ COLNAME=_CSNAMES_];
+        GNAMES = { "Chi sq." "d.f." "p-value" }; 
+        PRINT , 
+        'Wald Chi-square test of significance';
+        PRINT _CSTATS_ [COLNAME=GNAMES ROWNAME=_BLANK_ FORMAT=10.4];
+        RUN DIVIDER;
+     END;   /* of _PRINT_ loop */	
+     
